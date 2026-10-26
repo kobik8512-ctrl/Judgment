@@ -165,6 +165,15 @@ button{font:inherit;color:inherit;border:none;background:none;cursor:pointer}
 .lb-row .pts{font-weight:800;color:var(--text)}
 .logout-mini{font-size:.75rem;color:var(--muted);text-decoration:underline;background:none;border:none;padding:4px;margin-top:6px}
 
+
+#lang-btns button, .lang-btns button{
+  pointer-events:auto!important;
+  cursor:pointer!important;
+  position:relative;
+  z-index:5;
+}
+#lang-search{position:relative;z-index:6;}
+
 </style>
 </head>
 <body>
@@ -175,8 +184,8 @@ button{font:inherit;color:inherit;border:none;background:none;cursor:pointer}
       <div class="scales">⚖️</div>
       <h2>JUDGMENT</h2>
       <p id="auth-sub">Sign in to save points &amp; join the leaderboard</p>
-      <button type="button" class="btn-google" id="btn-google">Continue with Google</button>
-      <button type="button" class="btn-guest" id="btn-guest">Continue as Guest</button>
+      <button type="button" class="btn-google" id="btn-google" onclick="window.__googleAuth&&window.__googleAuth()">Continue with Google</button>
+      <button type="button" class="btn-guest" id="btn-guest" onclick="window.__guestAuth&&window.__guestAuth()">Continue as Guest</button>
       <div class="err" id="auth-err"></div>
     </div>
   </div>
@@ -1271,17 +1280,22 @@ function buildLangButtons(filter){
   list.forEach(function(L){
     var b=document.createElement("button");
     b.type="button";
+    b.setAttribute("data-lang", L.code);
     b.innerHTML='<span class="flag">'+(L.flag||"")+'</span><span class="lname">'+(L.name||L.code)+'</span>';
-    b.onclick=function(){
+    b.addEventListener("click", function(ev){
+      ev.preventDefault();
+      ev.stopPropagation();
       lang=L.code;
       try{localStorage.setItem("judgment_lang",lang)}catch(e){}
-      applyUI();
-      show("home");
-      if(typeof refreshHomeUser==="function") refreshHomeUser();
-    };
+      try{show("home");}catch(e){console.error(e)}
+      try{applyUI();}catch(e){console.error("applyUI",e)}
+      try{refreshHome();}catch(e){}
+      try{refreshHomeUser();}catch(e){}
+    });
     box.appendChild(b);
   });
 }
+
 
 const LANG_FALLBACK={
   en:"en",ka:"ka",ru:"ru",el:"el",tl:"tl",es:"es",de:"de",fr:"fr",tr:"tr",pt:"pt",
@@ -1504,47 +1518,62 @@ function goAfterAuth(){
   show("lang");try{buildLangButtons();}catch(e){}
 }
 
+window.__googleAuth=function(){return startGoogle();};
+window.__guestAuth=function(){return startGuest();};
 function startGuest(){
-  currentUser={
-    uid:"guest_"+Math.random().toString(36).slice(2,10),
-    provider:"guest",
-    username:null,
-    score:0,best:0,souls:0,insight:0,perfect:0,upgrades:{},ach:{}
-  };
-  // restore if same browser guest with username? skip
-  saveLocalUser(currentUser);
-  $("auth-err").textContent="";
-  show("usersetup");
+  try{
+    currentUser={
+      uid:"guest_"+Math.random().toString(36).slice(2,12),
+      provider:"guest",
+      username:null,
+      score:0,best:0,souls:0,insight:0,perfect:0,upgrades:{},ach:{}
+    };
+    saveLocalUser(currentUser);
+    var err=$("auth-err"); if(err) err.textContent="";
+    show("usersetup");
+    var inp=$("username-input"); if(inp){ inp.value=""; setTimeout(function(){inp.focus();},200); }
+  }catch(e){
+    var err2=$("auth-err"); if(err2) err2.textContent=e.message||"Guest failed";
+  }
 }
 
 async function startGoogle(){
-  $("auth-err").textContent="";
-  if(!fbReady){
-    $("auth-err").textContent="Google login needs Firebase config. Use Guest for now, or paste your Firebase keys in the script.";
-    return;
-  }
+  var errEl=$("auth-err");
+  if(errEl) errEl.textContent="";
   try{
+    if(!fbReady){
+      try{ await initFirebase(); }catch(e){}
+    }
+    if(!fbReady || !fbAuth){
+      if(errEl) errEl.textContent="Google needs Firebase. Use Guest, or check config.";
+      return;
+    }
     var provider=new firebase.auth.GoogleAuthProvider();
     var res=await fbAuth.signInWithPopup(provider);
     var u=res.user;
+    if(!u){ if(errEl) errEl.textContent="No user returned"; return; }
     var uid=u.uid;
     var existing=null;
     try{
-      var snap=await fbDb.ref("judgmentUsers/"+uid).once("value");
+      var snap=await Promise.race([
+        fbDb.ref("judgmentUsers/"+uid).once("value"),
+        new Promise(function(_,rej){setTimeout(function(){rej(new Error("timeout"))},5000)})
+      ]);
       existing=snap.val();
-    }catch(e){}
-    if(existing&&existing.username){
+    }catch(e){ existing=null; }
+    if(existing && existing.username){
       currentUser=Object.assign({uid:uid,provider:"google"}, existing);
       saveLocalUser(currentUser);
       syncStateFromUser();
-      show("lang");try{buildLangButtons();}catch(e){}
+      show("lang");
+      try{buildLangButtons()}catch(e){}
     } else {
       currentUser={uid:uid,provider:"google",username:null,score:0,best:0,souls:0,insight:0,perfect:0,upgrades:{},ach:{}};
       saveLocalUser(currentUser);
       show("usersetup");
     }
   }catch(e){
-    $("auth-err").textContent=e.message||"Google sign-in failed";
+    if(errEl) errEl.textContent=(e && e.message) || "Google sign-in failed";
   }
 }
 
@@ -1581,7 +1610,12 @@ let typeTimer=null,typeSkip=false,typeDone=false;
 
 const $=id=>document.getElementById(id);
 function save(){try{localStorage.setItem("judgment_save",JSON.stringify(state))}catch(e){} try{if(typeof pushUserCloud==="function")pushUserCloud()}catch(e){}}
-function show(id){document.querySelectorAll(".screen").forEach(s=>s.classList.remove("on"));$(id).classList.add("on")}
+function show(id){
+  document.querySelectorAll(".screen").forEach(function(s){s.classList.remove("on")});
+  var el=document.getElementById(id);
+  if(el) el.classList.add("on");
+  if(id==="lang"){try{buildLangButtons((document.getElementById("lang-search")||{}).value||"");}catch(e){}}
+}
 function rankName(){const R=t().ranks;return R[Math.min(R.length-1,Math.floor(state.souls/12))]}
 function shuffle(a){const c=a.slice();for(let i=c.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[c[i],c[j]]=[c[j],c[i]]}return c}
 function rand(a,b){return a+Math.floor(Math.random()*(b-a+1))}
@@ -1589,24 +1623,23 @@ function verdictFromWeight(w){if(w>=3)return"heaven";if(w<=-3)return"hell";retur
 function actText(a){var c=(typeof LANG_FALLBACK!=="undefined"&&LANG_FALLBACK[lang])||lang;return a[c]||a.en}
 function reasonText(key){return(REASON_TEXT[lang]||REASON_TEXT.en)[key]||key}
 
+function setTxt(id,val){var el=document.getElementById(id);if(el)el.textContent=val;}
 function applyUI(){
   const u=t();
-  $("home-sub").textContent=u.sub;
-  $("l-score").textContent=u.score;$("l-best").textContent=u.best;$("l-souls").textContent=u.souls;
-  $("l-rank").textContent=u.rank;$("l-ins").textContent=u.ins;
-  $("m-normal").textContent=u.normal;$("m-timed").textContent=u.timed;$("m-hard").textContent=u.hard;
-  if($("r-easy")) $("r-easy").textContent=u.easyText||"Easy text";
-  if($("r-normal")) $("r-normal").textContent=u.normalText||"Normal text";
-  $("btn-start").textContent=u.begin;$("btn-shop").textContent=u.shop;$("btn-ach").textContent=u.ach;
-  $("btn-next").textContent=u.next;$("btn-menu").textContent=u.menu;
-  $("shop-title").textContent=u.shopTitle;$("ach-title").textContent=u.achTitle;
-  $("shop-back").textContent=u.back;$("ach-back").textContent=u.back;$("shop-ins-l").textContent=u.ins;
-  (function(){var L=LANG_META.find(function(x){return x.code===lang});$("btn-lang").textContent=L?(L.flag+" "+lang.toUpperCase()):lang.toUpperCase();})();
-  if($("btn-howto")) $("btn-howto").textContent=t().howtoTitle||"How to play";
-  $("st-1").textContent=u.stepRead;$("st-2").textContent=u.stepInv;$("st-3").textContent=u.stepJudge;$("st-4").textContent=u.stepReason;
+  setTxt("home-sub",u.sub);
+  setTxt("l-score",u.score);setTxt("l-best",u.best);setTxt("l-souls",u.souls);
+  setTxt("l-rank",u.rank);setTxt("l-ins",u.ins);
+  setTxt("m-normal",u.normal);setTxt("m-timed",u.timed);setTxt("m-hard",u.hard);
+  if($("r-easy")) setTxt("r-easy",u.easyText||"Easy text");
+  if($("r-normal")) setTxt("r-normal",u.normalText||"Normal text");
+  setTxt("btn-start",u.begin);setTxt("btn-shop",u.shop);setTxt("btn-ach",u.ach);
+  setTxt("btn-next",u.next);setTxt("btn-menu",u.menu);
+  setTxt("shop-title",u.shopTitle);setTxt("ach-title",u.achTitle);
+  setTxt("shop-back",u.back);setTxt("ach-back",u.back);setTxt("shop-ins-l",u.ins);
+  (function(){var L=LANG_META.find(function(x){return x.code===lang});setTxt("btn-lang",L?(L.flag+" "+lang.toUpperCase()):lang.toUpperCase());})();
+  if($("btn-howto")) setTxt("btn-howto",t().howtoTitle||"How to play");
+  setTxt("st-1",u.stepRead);setTxt("st-2",u.stepInv);setTxt("st-3",u.stepJudge);setTxt("st-4",u.stepReason);
   refreshHome();
-
-  if(id==="lang"){try{buildLangButtons(($("lang-search")&&$("lang-search").value)||"");}catch(e){}}
 }
 function refreshHome(){
   if(typeof refreshHomeUser==="function") refreshHomeUser();
@@ -2083,20 +2116,22 @@ $("btn-logout").onclick=function(){logout()};
 buildLangButtons();
 
 (async function bootAuth(){
-  await initFirebase();
-  var lu=loadLocalUser();
-  if(lu&&lu.username){
+  try{ await initFirebase(); }catch(e){ console.warn(e); }
+  var lu=null;
+  try{ lu=loadLocalUser(); }catch(e){}
+  // Only auto-enter if they already finished username setup
+  if(lu && lu.username){
     currentUser=lu;
-    syncStateFromUser();
-    // skip auth if already logged in
-    show("lang");try{buildLangButtons();}catch(e){}
-  } else if(lu&&!lu.username){
-    currentUser=lu;
-    show("usersetup");
+    try{ syncStateFromUser(); }catch(e){}
+    show("lang");
+    try{ buildLangButtons(); }catch(e){}
   } else {
+    // Incomplete guest/session → back to Google / Guest screen
+    currentUser=null;
+    try{ clearLocalUser(); }catch(e){}
     show("auth");
   }
-  refreshHomeUser();
+  try{ refreshHomeUser(); }catch(e){}
 })();
 
 refreshHomeUser();
